@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vue 3 with CDN</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Barlow:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&family=Saira:ital,wght@0,100..900;1,100..900&display=swap"
+        rel="stylesheet" />
+    <link rel="stylesheet" type="text/css" href="styles.css">
+</head>
+
+<body>
+    <div id="app">
+        <h1>NFL DEPTH CHART</h1>
+        <div class="teamSelectContainer">
+            <label for="teams">Select a Team</label>
+            <select name="teamSelect" id="team-select" v-if="this.loaded" v-model="selectedTeam">
+                <option v-for="(team, index) in this.teams" :value="team">
+                    {{team.team.displayName}}
+                </option>
+            </select>
+        </div>
+        <div class="team-hero-banner" v-if="this.selectedTeam">
+            <h1>
+                {{this.selectedTeam.team.displayName}} Depth Chart
+            </h1>
+            <img id="team-logo" :src="this.selectedTeam.team.logos[0].href" />
+        </div>
+        <div class="sectionDepth" v-if="offensivePositions && teamColors.primary">
+            <position-filter :def="this.defPosAbs" :off="this.offPosAbs" :active="this.positionFilter"
+                @update-filter="handlePositionFilterUpdate" @batch-update-filter="handleBatchFilterUpdate">
+            </position-filter>
+            <section tabindex="0" role="contentinfo" :aria-label="`Depth chart for ${p} position`"
+                v-for="(p, index) in filteredPositions" v-if="this.loaded">
+                <position-depth :isLoaded="this.loaded" :key="p" :active="this.positionFilter" :pos="p"
+                    :colors="teamColors" :positions="positionalPlayers(p)">
+                </position-depth>
+            </section>
+        </div>
+        <footer>Created by Ted Kreutzer 10/26/24</footer>
+    </div>
+
+    <script>
+        /**
+         * POSITION FILTER COMPONENT
+         * Interface for filtering between specific positions, or between offensive and defensive positions as a group
+         * @param def - array of defensive position abbreviations
+         * @param off - array of offensive position abbreviations
+         * @param active - array of currently selected positions to show (if none selected (default), show all positions)
+         */
+        const PositionFilter = {
+            props: {
+                def: {
+                    type: Array,
+                    required: true,
+                },
+                off: {
+                    type: Array,
+                    required: true,
+                },
+                active: {
+                    type: Array,
+                    required: true,
+                },
+            },
+            emits: ['update-filter', 'batch-update-filter'],
+            methods: {
+                handleEvent(pAbbr) {
+                    this.$emit("update-filter", pAbbr);
+                },
+                handleBatchEvent(positions) {
+                    this.$emit("batch-update-filter", positions);
+                },
+            },
+            template: /*html*/ `
+            <div class="positionFilterContainer">
+                <p>Select Positions to Filter By: </p>
+                <div class="individual-position-buttons">
+                    <button
+                        class="positionFilter-button"
+                        v-for="(position, index) in [...this.off, ...this.def]"
+                        :class="{ active: this.active.includes(position) }"
+                        @click="handleEvent(position)">
+                            {{position}}
+                    </button>
+                </div>
+                <div id="section-filter-buttons">
+                    <button 
+                        @click="handleBatchEvent(this.def)"
+                        aria-label="Show all defense. Adjust filters to only show defensive players">
+                        Show All Defense
+                    </button>
+                    <button 
+                        @click="handleBatchEvent(this.off)"
+                        aria-label="Show all defense. Adjust filters to only show offensive players">
+                        Show All Offense
+                    </button>
+                    <button @click="handleBatchEvent([])" aria-label="Reset all filters">Reset</button>
+                </div>
+            </div>
+        `,
+        };
+
+        /**
+         * PLAYER STATS component
+         * Pure component displaying player's height, experience, "grade" (made up), and status
+         * @param player - individual athlete
+         * @param isExpanded - controls whether to show/hide the more detailed statistics
+         */
+        const PlayerStats = {
+            props: ["player", "isExpanded"],
+            template: /*html*/ `
+                <div class="playerStatsContainer" v-if="isExpanded">
+                    <div class="playerStatsContainer-row">
+                        <p class="playerStat">HT:<br/> {{player.displayHeight}}</p>
+                        <p class="playerStat">EXP:<br/> {{player.experience.years}} yrs</p>
+                    </div>
+                    <div class="playerStatsContainer-row">
+                        <p class="playerStat">GRD:<br/> {{player.grade}}</p>
+                        <p class="playerStat">STS:<br/> {{player.status.abbreviation}}</p>
+                    </div>
+                </div>
+            `,
+        };
+
+        /**
+         * PLAYER TOOLTIP component
+         * Controller for absolutely-positioned tooltip, showing basic player stats when the player card is NOT expanded
+         * @param stats - stats for the player which the user's mouse is hovering over
+         */
+        const PlayerTooltip = {
+            props: ["stats"],
+            components: { PlayerStats },
+            data() {
+                const mTop = "0px";
+                const mLeft = "0px";
+                return {
+                    mTop,
+                    mLeft,
+                };
+            },
+            mounted() {
+                document.addEventListener("mousemove", (event) => {
+                    this.mLeft = event.clientX + "px";
+                    this.mTop = event.clientY - 5 + window.scrollY + "px";
+                });
+            },
+            template: /*html*/ `
+            <div :style="{top: this.mTop, left: this.mLeft}" id="player-tooltip">
+                <player-stats :player="stats" isExpanded="true"></player-stats>
+                <p class="player-tooltip-caption">click to expand</p>
+            </div>
+        `,
+        };
+
+        /**
+         * PLAYER CARD component
+         * Displays individual players and their stats to the user
+         * Controls state of tooltips
+         * @param colors - team colors: {primary: string, secondary: string}
+         * @param player - individual athlete data
+         * @param isDesktop - boolean determined by viewport width
+         * @param isExpanded - boolean controlling expansion of detailed stats in the row
+         */
+        const PlayerCard = {
+            props: ["colors", "player", "isDesktop", "isExpanded", "isSmallDesktop"],
+            data() {
+                const isHovering = false;
+                return {
+                    isHovering,
+                };
+            },
+            components: { PlayerTooltip, PlayerStats },
+            computed: {
+                computedAriaLabel() {
+                    return `${this.player.firstName} ${this.player.lastName}. Grade is ${this.player.grade}. Click or activate to show more.`
+                }
+            },
+            template: /*html*/ `
+            <div
+                class="playerCard"
+                :aria-label="computedAriaLabel"
+                :style="{backgroundColor: colors.secondary, borderColor: colors.primary}"
+                @mouseover="this.isHovering = true"
+                @mouseleave = "this.isHovering = false"
+            >
+                <player-tooltip v-if="this.isHovering" v-show="!isExpanded && isDesktop" :stats="player"></player-tooltip>
+                
+                <div class="playerInfoContainer">
+                    <div class="playerNameContainer">
+                        <span class="playerNameContainer-pos" v-if="isDesktop">{{player.position.abbreviation}}</span>
+                        <h2 class="player-name" v-if="isDesktop || isSmallDesktop">{{player.shortName}}</h2>
+                        <h2 class="player-name" v-else>{{player.lastName}}</h2>
+                        <span class="playerNameContainer-jer" v-if="isDesktop">#{{player.jersey}}</span>
+                    </div>
+                    <player-stats :player="player" :isDesktop="isDesktop" :isExpanded="isExpanded"></player-stats>
+                    <div class="playerCard-hero" v-show="isDesktop && isExpanded">
+                    <img
+                        :src="player.headshot.href"
+                        :alt="player.headshot.alt"
+                    />
+                </div>
+                </div>
+            </div>
+            `,
+        };
+
+        /**
+         * POSITION DEPTH component
+         * Contains roster information for selected team by position
+         * Controls sorting of roster within each position (lookup string is translated into object dot-notation for dynamic access of athlete data; i.e., can easily add other sorting parameters)
+         * @param colors - team colors. sets scrollbar color based on secondary team color.
+         * @param positions - array containing detailed information on a team's roster & individual athletes
+         * @param pos - current position being rendered
+         */
+        const PositionDepth = {
+            components: { PlayerCard },
+            props: ["colors", "positions", "pos", "active", "isLoaded"],
+            mounted() {
+                this.checkIsDesktop();
+                window.addEventListener("resize", this.checkIsDesktop);
+            },
+            data() {
+                const sortingByOptions = [
+                    { display: "EXP (d)", lookupString: "experience.years", isAsc: false },
+                    { display: "EXP (a)", lookupString: "experience.years", isAsc: true },
+                    { display: "GRD (d)", lookupString: "grade", isAsc: false },
+                    { display: "GRD (a)", lookupString: "grade", isAsc: true },
+                ];
+                const isDesktop = false;
+                const isSmallDesktop = false;
+                const selectedSort = undefined;
+                const isRowExpanded = false;
+                return {
+                    sortingByOptions,
+                    selectedSort,
+                    isDesktop,
+                    isRowExpanded,
+                    isSmallDesktop
+                };
+            },
+            methods: {
+                getPropValues(obj) {
+                    const parts = this.selectedSort.lookupString.split(".");
+                    return parts.reduce((a, v) => a[v], obj);
+                },
+                checkIsDesktop() {
+                    this.isDesktop = window.innerWidth > 1225
+                    this.isSmallDesktop = window.innerWidth > 900 && window.innerWidth < 1225
+
+                },
+                handleCardClick() {
+                    this.isRowExpanded = !this.isRowExpanded;
+                },
+            },
+
+            computed: {
+                scrollbarColorComputed() {
+                    if (this.colors) {
+                        return {
+                            "--scrollbar-color": this.colors.primary,
+                        };
+                    }
+                },
+                sortedPositionalRosterComputed() {
+                    if (this.selectedSort) {
+                        const isSortAscending = this.selectedSort.isAsc
+                        return [...this.positions].sort((p1, p2) => isSortAscending ?
+                            (this.getPropValues(p1) < this.getPropValues(p2) ? -1 : 1) :
+                            this.getPropValues(p1) > this.getPropValues(p2) ? -1 : 1)
+
+                    } else {
+                        return this.positions;
+                    }
+                },
+            },
+            template: /*html*/ `
+            <section  class="positional-roster" v-if="active.includes(pos) || active.length === 0">
+                <div class="positionalRoster-leftCol" >
+                    <h2 class="position-abbr">{{pos}}</h2>
+                    <div class="position-sort">
+                        <label class="position-sort-label" for="sortSelect">Sort:</label>
+                        <select name="sortSelect" class="sort-select" v-model="selectedSort" >
+                            <option 
+                                v-for="(opt, index) in sortingByOptions" 
+                                :value="opt">
+                                {{opt.display}}
+                            </option>
+                        </select>
+                    </div>
+                </div>
+                <ul class="position-depth" :style="scrollbarColorComputed" v-if="colors.primary && colors.secondary && sortedPositionalRosterComputed.length > 0">
+                    <li class="position-depth-player" v-for="player in sortedPositionalRosterComputed">
+                        <button class="player-card-button" @click="handleCardClick">
+                            <player-card
+                                :isExpanded="isRowExpanded"
+                                :colors="colors"
+                                :player="player"
+                                :isDesktop="this.isDesktop"
+                                :isSmallDesktop = "this.isSmallDesktop"
+                            ></player-card>
+                        </button>
+                    </li>
+                </ul>
+                <h2 class="no-players-message" v-else-if="sortedPositionalRosterComputed.length === 0">No ACTIVE or DAY-TO-DAY players with position {{pos}} found.</h2>    
+            </section>
+            `,
+        };
+
+        const app = Vue.createApp({
+            components: {
+                PositionFilter,
+                PositionDepth,
+            },
+            data() {
+                const allPlayers = [];
+                const loaded = false;
+                const selectedTeam = undefined;
+                const offensivePositions = [];
+                const defensivePositions = [];
+                const offPosAbs = ["QB", "RB", "WR", "TE"];
+                const defPosAbs = ["PK", "LB", "CB", "S", "DE", "DT"];
+                const statusIds = ["1", "13"];
+                const teams = [];
+                const teamColors = {
+                    primary: undefined,
+                    secondary: undefined,
+                };
+                const positionFilter = [];
+                const sortBy = [];
+                return {
+                    allPlayers,
+                    loaded,
+                    selectedTeam,
+                    offensivePositions,
+                    defensivePositions,
+                    offPosAbs,
+                    defPosAbs,
+                    statusIds,
+                    teams,
+                    teamColors,
+                    positionFilter,
+                };
+            },
+            methods: {
+                positionalPlayers: function (position) {
+                    return this.allPlayers.filter(
+                        (e) => e.position.abbreviation === position
+                    )
+                },
+                handleBatchFilterUpdate: function (position) {
+                    this.positionFilter = [...position];
+                },
+                handlePositionFilterUpdate: function (position) {
+                    const index = this.positionFilter.indexOf(position);
+                    if (index >= 0) {
+                        this.positionFilter.splice(index, 1);
+                    } else {
+                        this.positionFilter.push(position);
+                    }
+                },
+            },
+            mounted() {
+                fetch(
+                    "https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams"
+                )
+                    .then((res) => res.json())
+                    .then((data) => {
+                        this.teams = data.sports[0].leagues[0].teams;
+                    }).then(() => {
+                        this.selectedTeam = this.teams[0]
+                    });
+            },
+            computed: {
+                filteredPositions() {
+                    return [...this.offPosAbs, ...this.defPosAbs]
+                },
+            },
+            watch: {
+                selectedTeam(newTeam) {
+                    this.loaded = false;
+                    const controller = new AbortController();
+                    this.offensivePositions = [];
+                    this.defensivePositions = [];
+                    this.allPlayers = []
+
+                    fetch(
+                        `https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/${newTeam.team.id}`
+                    )
+                        .then((res) => res.json())
+                        .then((data) => {
+                            this.teamColors = {
+                                primary: `#${data.team.color}`,
+                                secondary: `#${data.team.alternateColor}`,
+                            };
+                        }).then(() => {
+                            fetch(
+                                `https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/${newTeam.team.id}?enable=roster,projection,stats`
+                            )
+                                .then((res) => res.json())
+                                .then((data) => {
+                                    this.allPlayers = data.team.athletes
+                                        .filter((a) => this.statusIds.includes(a.status.id))
+                                        .map((v) => ({
+                                            ...v,
+                                            grade: Math.floor(Math.random() * (100 - 30 + 1) + 30), //this is purely for demo purposes, to give the user something meaningful to sort by, as the ESPN api does not provide fantasy rankings or projections (for free)
+                                            status: {
+                                                ...v.status,
+                                                abbreviation: v.status.id === "13" ? "Q" : v.status.abbreviation
+                                            }
+                                        }));
+                                }).then(() => {
+                                    this.loaded = true;
+                                });
+                        });
+
+
+                    Vue.onWatcherCleanup(() => {
+                        controller.abort()
+                    })
+                },
+            },
+        });
+        app.mount("#app");
+    </script>
+</body>
+
+</html>
