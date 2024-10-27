@@ -189,7 +189,7 @@
             >
                 <player-tooltip v-if="this.isHovering" v-show="!isExpanded && isDesktop" :stats="player"></player-tooltip>
                 
-                <div class="playerInfoContainer">
+                <div class="playerInfoContainer" v-if="player && player.position">
                     <div class="playerNameContainer">
                         <span class="playerNameContainer-pos" v-if="isDesktop">{{player.position.abbreviation}}</span>
                         <h2 class="player-name" v-if="isDesktop || isSmallDesktop">{{player.shortName}}</h2>
@@ -199,6 +199,7 @@
                     <player-stats :player="player" :isDesktop="isDesktop" :isExpanded="isExpanded"></player-stats>
                     <div class="playerCard-hero" v-show="isDesktop && isExpanded">
                     <img
+                        v-if="player && player.headshot"
                         :src="player.headshot.href"
                         :alt="player.headshot.alt"
                     />
@@ -416,8 +417,6 @@
                                     this.loaded = true;
                                 });
                         });
-
-
                     Vue.onWatcherCleanup(() => {
                         controller.abort()
                     })
